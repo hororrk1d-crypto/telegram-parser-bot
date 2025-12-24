@@ -1,0 +1,20 @@
+# Telegram
+python-telegram-bot==20.7
+pyrogram==2.0.106
+tgcrypto==1.2.5
+
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Database
+aiosqlite==0.19.0
+
+# Utilities
+python-dotenv==1.0.0
+asyncio==3.4.3
+psutil==5.9.7
+aiofiles==23.2.1
+
+# Environment
+gunicorn==21.2.0

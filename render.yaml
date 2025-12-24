@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: telegram-parser-bot
+    env: python
+    region: frankfurt  # or oregon, singapore
+    plan: free  # or starter, professional
+    
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    
+    healthCheckPath: /health
+    autoDeploy: true
+    
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: PORT
+        value: 8080
+      - key: PYTHONUNBUFFERED
+        value: 1
+    
+    disk:
+      name: data
+      mountPath: /app/data
+      sizeGB: 1
+    
+    buildFilter:
+      paths:
+        - bot.py
+        - database.py
+        - settings.py
+        - requirements.txt
+        - Dockerfile
