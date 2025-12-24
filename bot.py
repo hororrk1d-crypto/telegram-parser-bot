@@ -880,12 +880,13 @@ class SubscriptionTelegramBot:
     
     # ==================== ОСНОВНОЙ ЦИКЛ ====================
     
-    async def create_and_start_app(self):
+     async def create_and_start_app(self):
         """Создание и запуск приложения БЕЗ конфликтов"""
         await self.initialize()
         
         self.app = Application.builder().token(BOT_TOKEN).build()
         
+        # Настраиваем обработчики
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('start', self.start_command)],
             states={
@@ -927,44 +928,35 @@ class SubscriptionTelegramBot:
         
         logger.info("🤖 Telegram Parser Bot инициализирован!")
         
+        # Инициализируем приложение
         await self.app.initialize()
         
-        # ОЧЕНЬ ВАЖНО: Очищаем старые обновления и запускаем polling правильно
+        # Удаляем вебхук если он был установлен
         try:
-            # Удаляем вебхук если он был установлен
             await self.app.bot.delete_webhook(drop_pending_updates=True)
             logger.info("✅ Вебхук удален, pending updates очищены")
         except Exception as e:
             logger.warning(f"Не удалось удалить вебхук: {e}")
         
-        # Запускаем polling с drop_pending_updates
+        # Запускаем приложение
         await self.app.start()
         
-        # Используем низкоуровневый запуск polling
-        self.app.updater._running = True
+        # Запускаем polling стандартным способом
+        await self.app.updater.start_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
         
         logger.info("✅ Бот запущен в режиме polling")
         
-        # Главный цикл
-        while self.app.updater._running:
-            try:
-                # Получаем обновления с правильным offset
-                updates = await self.app.bot.get_updates(
-                    offset=self.app.updater._update_queue.maxsize,
-                    timeout=30,
-                    allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=False
-                )
-                
-                if updates:
-                    for update in updates:
-                        await self.app.update_queue.put(update)
-            except Exception as e:
-                logger.error(f"Ошибка получения обновлений: {e}")
-                await asyncio.sleep(5)
-        
-        stop_event = asyncio.Event()
-        await stop_event.wait()
+        # Ждем остановки (просто держим приложение запущенным)
+        try:
+            # Ожидаем бесконечно (до остановки приложения)
+            await asyncio.Event().wait()
+        except KeyboardInterrupt:
+            logger.info("🤖 Бот остановлен по команде")
+        except Exception as e:
+            logger.error(f"Ошибка в главном цикле: {e}")
     
     async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда отмены"""
@@ -1023,31 +1015,41 @@ class SubscriptionTelegramBot:
                 reply_markup=self.get_main_menu_keyboard()
             )
     
-    async def cleanup(self):
+       async def cleanup(self):
         """Очистка ресурсов"""
         if self.app:
             try:
-                self.app.updater._running = False
+                # Останавливаем polling
+                if self.app.updater.running:
+                    await self.app.updater.stop()
+                
+                # Останавливаем приложение
                 await self.app.stop()
                 await self.app.shutdown()
-            except:
-                pass
+                logger.info("✅ Бот остановлен")
+            except Exception as e:
+                logger.error(f"Ошибка при остановке бота: {e}")
+        
         await db.close()
 
 # ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 
 def run_fastapi_server():
     """Запуск FastAPI сервера"""
-    config = uvicorn.Config(
-        fastapi_app, 
-        host="0.0.0.0", 
-        port=PORT, 
-        log_level="warning"
-    )
-    server = uvicorn.Server(config)
-    
-    import asyncio
-    asyncio.run(server.serve())
+    try:
+        config = uvicorn.Config(
+            fastapi_app, 
+            host="0.0.0.0", 
+            port=PORT, 
+            log_level="warning",
+            access_log=False
+        )
+        server = uvicorn.Server(config)
+        
+        import asyncio
+        asyncio.run(server.serve())
+    except Exception as e:
+        logger.error(f"Ошибка FastAPI: {e}")
 
 async def main():
     """Основная функция запуска"""
