@@ -1,0 +1,43 @@
+# Python 
+__pycache__/ 
+*.py[cod] 
+*.so 
+.Python 
+build/ 
+dist/ 
+*.egg-info/ 
+ 
+# Virtual Environment 
+venv/ 
+venv311/ 
+env/ 
+.venv/ 
+ 
+# Environment 
+.env 
+.env.local 
+ 
+# IDE 
+.vscode/ 
+.idea/ 
+*.swp 
+*.swo 
+ 
+# OS 
+.DS_Store 
+Thumbs.db 
+ 
+# Data and Logs 
+data/*.db 
+logs/*.log 
+user_sessions/*.session 
+temp/* 
+ 
+# Keep empty directories 
+!data/.gitkeep 
+!logs/.gitkeep 
+!user_sessions/.gitkeep 
+!temp/.gitkeep 
+".env" 
+".env.local" 
+"__pycache__/" 
