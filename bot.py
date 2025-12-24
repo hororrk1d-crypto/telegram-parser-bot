@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🤖 Telegram Parser Bot (Упрощенная версия для Render)
+🤖 Telegram Parser Bot (Упрощенная версия для Render) v2.1
 Парсер Telegram каналов с системой подписок (без Telethon)
 """
 
@@ -12,7 +12,6 @@ import uuid
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
-import pandas as pd
 
 # === ВАЖНО: Исправление для Windows ===
 if sys.platform == 'win32':
@@ -22,16 +21,15 @@ if sys.platform == 'win32':
 from dotenv import load_dotenv
 load_dotenv()
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
     ContextTypes, MessageHandler, filters, ConversationHandler
 )
 from telegram.constants import ParseMode
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 import uvicorn
-import aiofiles
 
 # Импортируем нашу базу данных
 from database import db
@@ -60,18 +58,14 @@ if not BOT_TOKEN:
 # Настройки для вебхука (для Render)
 PORT = int(os.environ.get('PORT', '8080'))
 
-# Настройки парсинга
-PARSING_SETTINGS = {
-    'MAX_PARTICIPANTS': 100,
-    'DELAY_BETWEEN_REQUESTS': 0.5
-}
-
 # Состояния ConversationHandler
 (START, MAIN_MENU, PARSE_CHANNEL, CHOOSE_PLAN, CONFIRM_PAYMENT) = range(5)
 
-# ==================== FASTAPI HEALTH CHECK ====================
-
+# Глобальные переменные
+app_instance = None
 fastapi_app = FastAPI()
+
+# ==================== FASTAPI HEALTH CHECK ====================
 
 @fastapi_app.get("/health")
 async def health_check():
@@ -86,28 +80,22 @@ async def root():
     return {
         "message": "Telegram Parser Bot is running", 
         "docs": "/health",
-        "version": "2.1.0"
+        "version": "2.1.1"
     }
 
-def run_fastapi():
-    """Запуск FastAPI в отдельном потоке"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
+@fastapi_app.post("/webhook")
+async def webhook(request: Request):
+    """Обработчик webhook от Telegram"""
     try:
-        config = uvicorn.Config(
-            fastapi_app, 
-            host="0.0.0.0", 
-            port=PORT, 
-            log_level="warning",
-            loop="asyncio"
-        )
-        server = uvicorn.Server(config)
-        loop.run_until_complete(server.serve())
+        data = await request.json()
+        if app_instance and app_instance.app:
+            from telegram import Update
+            update = Update.de_json(data, app_instance.app.bot)
+            await app_instance.app.process_update(update)
+        return {"status": "ok"}
     except Exception as e:
-        logger.error(f"Ошибка FastAPI: {e}")
-    finally:
-        loop.close()
+        logger.error(f"Ошибка webhook: {e}")
+        return {"status": "error", "message": str(e)}
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -144,31 +132,21 @@ async def check_subscription(user_id: int) -> Dict:
         'message': f"✅ Ваша подписка активна! Осталось: {days_left} дней"
     }
 
-async def export_to_file(data: List[Dict], format_type: str = 'txt') -> str:
-    """Экспорт данных в файл"""
+async def export_to_txt(data: List[Dict]) -> str:
+    """Экспорт данных в TXT файл"""
+    import aiofiles
     os.makedirs('temp', exist_ok=True)
-    filename = f"temp/export_{uuid.uuid4().hex[:8]}.{format_type}"
+    filename = f"temp/export_{uuid.uuid4().hex[:8]}.txt"
     
-    if format_type == 'txt':
-        lines = []
-        for item in data:
-            if 'username' in item and item['username']:
-                lines.append(item['username'])
-            elif 'id' in item:
-                lines.append(f"id_{item['id']}")
-        
-        async with aiofiles.open(filename, 'w', encoding='utf-8') as f:
-            await f.write('\n'.join(lines))
+    lines = []
+    for item in data:
+        if 'username' in item and item['username']:
+            lines.append(f"@{item['username']}")
+        elif 'id' in item:
+            lines.append(f"id_{item['id']}")
     
-    elif format_type == 'csv':
-        if data:
-            df = pd.DataFrame(data)
-            df.to_csv(filename, index=False, encoding='utf-8')
-    
-    elif format_type == 'xlsx':
-        if data:
-            df = pd.DataFrame(data)
-            df.to_excel(filename, index=False)
+    async with aiofiles.open(filename, 'w', encoding='utf-8') as f:
+        await f.write('\n'.join(lines))
     
     return filename
 
@@ -177,6 +155,8 @@ async def export_to_file(data: List[Dict], format_type: str = 'txt') -> str:
 class SubscriptionTelegramBot:
     def __init__(self):
         self.app = None
+        global app_instance
+        app_instance = self
     
     async def initialize(self):
         """Инициализация бота и базы данных"""
@@ -361,7 +341,6 @@ class SubscriptionTelegramBot:
             return CHOOSE_PLAN
             
         elif query.data == 'start_parsing':
-            # Проверяем подписку
             is_admin = await db.is_admin(user_id)
             if not is_admin:
                 subscription_status = await check_subscription(user_id)
@@ -383,30 +362,12 @@ class SubscriptionTelegramBot:
             await query.edit_message_text(
                 "🎯 **Демо-парсинг (ограниченная версия)**\n\n"
                 "Вы можете спарсить демо-данные (20 участников).\n\n"
-                "Выберите формат вывода результатов:",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📝 TXT файл", callback_data='format_txt')],
-                    [InlineKeyboardButton("📊 CSV файл", callback_data='format_csv')],
-                    [InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]
-                ]),
+                "Введите username канала (для демо можно любое название):",
                 parse_mode=ParseMode.MARKDOWN
             )
             context.user_data['demo_mode'] = True
             return PARSE_CHANNEL
             
-        elif query.data.startswith('format_'):
-            format_type = query.data.replace('format_', '')
-            context.user_data['export_format'] = format_type
-            await query.edit_message_text(
-                f"✅ Выбран формат: **{format_type.upper()}**\n\n"
-                f"📢 **Введите username канала:**\n"
-                f"• Без @ (например: `telegram`)\n"
-                f"• Или ссылку (например: `t.me/telegram`)\n\n"
-                f"⏱️ *Парсинг займет несколько секунд*",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return PARSE_CHANNEL
-        
         elif query.data == 'help':
             await self.help_command_callback(query)
             return MAIN_MENU
@@ -444,15 +405,12 @@ class SubscriptionTelegramBot:
         """Меню начала парсинга"""
         await query.edit_message_text(
             "🎯 **Парсинг Telegram канала**\n\n"
-            "Выберите формат вывода результатов:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📝 TXT файл", callback_data='format_txt')],
-                [InlineKeyboardButton("📊 CSV файл", callback_data='format_csv')],
-                [InlineKeyboardButton("📈 Excel файл", callback_data='format_excel')],
-                [InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]
-            ]),
+            "Введите username канала:\n"
+            "• Без @ (например: `telegram`)\n"
+            "• Или ссылку (например: `t.me/telegram`)",
             parse_mode=ParseMode.MARKDOWN
         )
+        return PARSE_CHANNEL
     
     async def my_subscription_callback(self, query, user_id: int):
         """Callback для кнопки 'Моя подписка'"""
@@ -536,17 +494,12 @@ class SubscriptionTelegramBot:
 • Годовая: 5000 RUB / 365 дней
 
 📊 **Что парсит бот:**
-• Участники публичных каналов
-• Демо-данные для тестирования
-
-📁 **Форматы экспорта:**
-• TXT - только usernames
-• CSV - полная таблица
-• Excel - для Microsoft Excel
+• Демо-данные участников каналов
+• Экспорт в TXT файл
 
 ⚠️ **Важно:**
 • Бот работает через официальный Telegram Bot API
-• Для парсинга приватных каналов нужны права администратора
+• Для демо-версии используется тестовая база данных
 """
         
         await query.edit_message_text(
@@ -742,29 +695,94 @@ class SubscriptionTelegramBot:
         
         status_message = await update.message.reply_text(
             f"🔍 **Начинаю парсинг канала:** `{channel_input}`\n"
-            f"📊 **Формат:** {context.user_data.get('export_format', 'txt')}\n"
             f"🎯 **Режим:** {'Демо' if demo_mode else 'Полный'}\n"
             f"⏳ **Пожалуйста, подождите...**",
             parse_mode=ParseMode.MARKDOWN
         )
         
         try:
-            if demo_mode:
-                await self.demo_parse_channel(
-                    user.id, 
-                    session_id, 
-                    channel_input, 
-                    status_message,
-                    context.user_data.get('export_format', 'txt')
+            import random
+            total_members = random.randint(10, 20) if demo_mode else random.randint(50, 200)
+            
+            await status_message.edit_text(
+                f"🔍 **Парсинг канала:** `{channel_input}`\n"
+                f"📊 **Прогресс:** 0/{total_members} участников\n"
+                f"⏳ **Завершено:** 0%\n\n"
+                f"🔄 *Пожалуйста, подождите...*",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Имитация прогресса
+            for i in range(0, total_members + 1, 5):
+                await asyncio.sleep(0.3)
+                progress = min(i, total_members)
+                await db.update_parsing_session(session_id, parsed_items=progress)
+                
+                if i % 10 == 0:
+                    try:
+                        await status_message.edit_text(
+                            f"🔍 **Парсинг канала:** `{channel_input}`\n"
+                            f"📊 **Прогресс:** {progress}/{total_members} участников\n"
+                            f"⏳ **Завершено:** {int(progress/total_members*100)}%\n\n"
+                            f"🔄 *Пожалуйста, подождите...*",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except:
+                        pass
+            
+            # Создаем демо-данные
+            demo_data = []
+            for i in range(total_members):
+                demo_data.append({
+                    'id': 1000000 + i,
+                    'username': f'user_{i}' if random.random() > 0.3 else '',
+                    'first_name': f'Имя_{i}',
+                    'last_name': f'Фамилия_{i}',
+                    'phone': f'+7999{random.randint(1000000, 9999999)}' if random.random() > 0.7 else '',
+                    'is_bot': random.random() > 0.9,
+                    'premium': random.random() > 0.8,
+                })
+            
+            # Экспортируем в файл
+            filename = await export_to_txt(demo_data)
+            
+            await db.update_parsing_session(
+                session_id, 
+                status='completed', 
+                parsed_items=total_members,
+                result_file_path=filename
+            )
+            
+            with open(filename, 'rb') as file:
+                if demo_mode:
+                    await status_message.edit_text(
+                        f"✅ **Демо-парсинг завершен!**\n\n"
+                        f"📊 **Результаты:**\n"
+                        f"• Канал: {channel_input}\n"
+                        f"• Спарсено участников: {total_members}\n\n"
+                        f"⚠️ *Это демо-версия*\n"
+                        f"*Купите подписку для полного доступа*",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    await status_message.edit_text(
+                        f"✅ **Парсинг завершен успешно!**\n\n"
+                        f"📊 **Результаты:**\n"
+                        f"• Канал: {channel_input}\n"
+                        f"• Спарсено участников: {total_members}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                
+                await status_message.chat.send_document(
+                    document=file,
+                    filename=f"parsed_{channel_input}.txt",
+                    caption=f"📊 Результаты парсинга {channel_input}\n👥 Участников: {total_members}"
                 )
-            else:
-                await self.botapi_parse_channel(
-                    user.id,
-                    session_id,
-                    channel_input,
-                    status_message,
-                    context.user_data.get('export_format', 'txt')
-                )
+            
+            try:
+                os.remove(filename)
+            except:
+                pass
             
         except Exception as e:
             logger.error(f"Ошибка парсинга: {e}", exc_info=True)
@@ -790,139 +808,6 @@ class SubscriptionTelegramBot:
                 parse_mode=ParseMode.MARKDOWN
             )
         return MAIN_MENU
-    
-    async def botapi_parse_channel(self, user_id: int, session_id: str, channel: str, 
-                                 status_message, export_format: str):
-        """Парсинг через Bot API (демо-версия)"""
-        try:
-            await db.update_parsing_session(session_id, status='processing')
-            
-            await status_message.edit_text(
-                f"🔍 **Подключаюсь к каналу:** `{channel}`\n"
-                f"📊 **Использую Bot API...**\n\n"
-                f"⏳ *Пожалуйста, подождите...*",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            # Демо-данные (в реальном боте здесь будет работа с Bot API)
-            import random
-            total_members = random.randint(50, 200)
-            
-            # Создаем демо-данные
-            demo_data = []
-            for i in range(total_members):
-                demo_data.append({
-                    'id': 1000000 + i,
-                    'username': f'user_{i}' if random.random() > 0.3 else '',
-                    'first_name': f'Имя_{i}',
-                    'last_name': f'Фамилия_{i}',
-                    'phone': f'+7999{random.randint(1000000, 9999999)}' if random.random() > 0.7 else '',
-                    'is_bot': random.random() > 0.9,
-                    'premium': random.random() > 0.8,
-                })
-            
-            # Экспортируем в файл
-            filename = await export_to_file(demo_data, export_format)
-            
-            await db.update_parsing_session(
-                session_id, 
-                status='completed', 
-                parsed_items=total_members,
-                result_file_path=filename
-            )
-            
-            with open(filename, 'rb') as file:
-                await status_message.edit_text(
-                    f"✅ **Парсинг завершен успешно!**\n\n"
-                    f"📊 **Результаты:**\n"
-                    f"• Канал: {channel}\n"
-                    f"• Спарсено участников: {total_members}\n"
-                    f"• Формат файла: {export_format.upper()}\n",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-                await status_message.chat.send_document(
-                    document=file,
-                    filename=f"parsed_{channel}.{export_format}",
-                    caption=f"📊 Результаты парсинга {channel}\n👥 Участников: {total_members}"
-                )
-            
-            try:
-                os.remove(filename)
-            except:
-                pass
-            
-        except Exception as e:
-            logger.error(f"Ошибка парсинга: {e}", exc_info=True)
-            raise
-    
-    async def demo_parse_channel(self, user_id: int, session_id: str, channel: str, 
-                               status_message, export_format: str):
-        """Демо-версия парсинга канала"""
-        import random
-        total_members = random.randint(10, 20)
-        
-        await db.update_parsing_session(session_id, status='processing', total_items=total_members)
-        
-        for i in range(0, total_members + 1, 5):
-            await asyncio.sleep(0.3)
-            progress = min(i, total_members)
-            await db.update_parsing_session(session_id, parsed_items=progress)
-            
-            if i % 10 == 0:
-                try:
-                    await status_message.edit_text(
-                        f"🔍 **Демо-парсинг канала:** `{channel}`\n"
-                        f"📊 **Прогресс:** {progress}/{total_members} участников\n"
-                        f"⏳ **Завершено:** {int(progress/total_members*100)}%\n\n"
-                        f"🔄 *Пожалуйста, подождите...*",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                except:
-                    pass
-        
-        demo_data = []
-        for i in range(total_members):
-            demo_data.append({
-                'id': 1000000 + i,
-                'username': f'user_{i}' if random.random() > 0.3 else '',
-                'first_name': f'Имя_{i}',
-                'last_name': f'Фамилия_{i}',
-                'phone': f'+7999{random.randint(1000000, 9999999)}' if random.random() > 0.7 else '',
-                'is_bot': random.random() > 0.9,
-                'premium': random.random() > 0.8,
-            })
-        
-        filename = await export_to_file(demo_data, export_format)
-        
-        await db.update_parsing_session(
-            session_id, 
-            status='completed', 
-            parsed_items=total_members,
-            result_file_path=filename
-        )
-        
-        with open(filename, 'rb') as file:
-            await status_message.edit_text(
-                f"✅ **Демо-парсинг завершен!**\n\n"
-                f"📊 **Результаты:**\n"
-                f"• Спарсено участников: {total_members}\n"
-                f"• Формат файла: {export_format.upper()}\n\n"
-                f"⚠️ *Это демо-версия*\n"
-                f"*Купите подписку для полного доступа*",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            await status_message.chat.send_document(
-                document=file,
-                filename=f"demo_parsed_{channel}.{export_format}",
-                caption=f"📊 Демо-результаты парсинга {channel}\n👥 Участников: {total_members}"
-            )
-        
-        try:
-            os.remove(filename)
-        except:
-            pass
     
     # ==================== АДМИН КОМАНДЫ ====================
     
@@ -996,7 +881,7 @@ class SubscriptionTelegramBot:
     # ==================== ОСНОВНОЙ ЦИКЛ ====================
     
     async def create_and_start_app(self):
-        """Создание и запуск приложения"""
+        """Создание и запуск приложения БЕЗ конфликтов"""
         await self.initialize()
         
         self.app = Application.builder().token(BOT_TOKEN).build()
@@ -1040,11 +925,43 @@ class SubscriptionTelegramBot:
         self.app.add_handler(CommandHandler("help", self.help_command))
         self.app.add_handler(CommandHandler("admin", self.admin_command))
         
-        logger.info("🤖 Telegram Parser Bot запущен!")
+        logger.info("🤖 Telegram Parser Bot инициализирован!")
         
         await self.app.initialize()
+        
+        # ОЧЕНЬ ВАЖНО: Очищаем старые обновления и запускаем polling правильно
+        try:
+            # Удаляем вебхук если он был установлен
+            await self.app.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("✅ Вебхук удален, pending updates очищены")
+        except Exception as e:
+            logger.warning(f"Не удалось удалить вебхук: {e}")
+        
+        # Запускаем polling с drop_pending_updates
         await self.app.start()
-        await self.app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        
+        # Используем низкоуровневый запуск polling
+        self.app.updater._running = True
+        
+        logger.info("✅ Бот запущен в режиме polling")
+        
+        # Главный цикл
+        while self.app.updater._running:
+            try:
+                # Получаем обновления с правильным offset
+                updates = await self.app.bot.get_updates(
+                    offset=self.app.updater._update_queue.maxsize,
+                    timeout=30,
+                    allowed_updates=Update.ALL_TYPES,
+                    drop_pending_updates=False
+                )
+                
+                if updates:
+                    for update in updates:
+                        await self.app.update_queue.put(update)
+            except Exception as e:
+                logger.error(f"Ошибка получения обновлений: {e}")
+                await asyncio.sleep(5)
         
         stop_event = asyncio.Event()
         await stop_event.wait()
@@ -1086,13 +1003,8 @@ class SubscriptionTelegramBot:
 • Годовая: 5000 RUB / 365 дней
 
 📊 **Что парсит бот:**
-• Участники публичных каналов
-• Демо-данные для тестирования
-
-📁 **Форматы экспорта:**
-• TXT - только usernames
-• CSV - полная таблица
-• Excel - для Microsoft Excel
+• Демо-данные участников каналов
+• Экспорт в TXT файл
 """
         
         user = update.effective_user
@@ -1114,11 +1026,28 @@ class SubscriptionTelegramBot:
     async def cleanup(self):
         """Очистка ресурсов"""
         if self.app:
-            await self.app.stop()
-            await self.app.shutdown()
+            try:
+                self.app.updater._running = False
+                await self.app.stop()
+                await self.app.shutdown()
+            except:
+                pass
         await db.close()
 
 # ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
+
+def run_fastapi_server():
+    """Запуск FastAPI сервера"""
+    config = uvicorn.Config(
+        fastapi_app, 
+        host="0.0.0.0", 
+        port=PORT, 
+        log_level="warning"
+    )
+    server = uvicorn.Server(config)
+    
+    import asyncio
+    asyncio.run(server.serve())
 
 async def main():
     """Основная функция запуска"""
@@ -1129,10 +1058,15 @@ async def main():
     bot = SubscriptionTelegramBot()
     
     try:
-        fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
+        # Запускаем FastAPI в отдельном потоке
+        fastapi_thread = threading.Thread(target=run_fastapi_server, daemon=True)
         fastapi_thread.start()
         logger.info(f"✅ Health check запущен на порту {PORT}")
         
+        # Даем время FastAPI запуститься
+        await asyncio.sleep(2)
+        
+        # Запускаем бота
         await bot.create_and_start_app()
         
     except KeyboardInterrupt:
@@ -1146,4 +1080,28 @@ async def main():
             logger.error(f"❌ Ошибка при очистке: {e}")
 
 if __name__ == '__main__':
+    # Проверяем, не запущен ли уже бот
+    import psutil
+    current_pid = os.getpid()
+    python_processes = []
+    
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            if 'python' in proc.info['name'].lower() and proc.info['pid'] != current_pid:
+                cmdline = ' '.join(proc.info['cmdline'] or [])
+                if 'bot.py' in cmdline:
+                    python_processes.append(proc.info['pid'])
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    
+    if python_processes:
+        logger.warning(f"Найден запущенный бот с PID: {python_processes}. Завершаем...")
+        for pid in python_processes:
+            try:
+                p = psutil.Process(pid)
+                p.terminate()
+                p.wait(timeout=5)
+            except:
+                pass
+    
     asyncio.run(main())
