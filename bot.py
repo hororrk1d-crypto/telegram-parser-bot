@@ -880,7 +880,9 @@ class SubscriptionTelegramBot:
     
     # ==================== ОСНОВНОЙ ЦИКЛ ====================
     
-     async def create_and_start_app(self):
+         # ==================== ОСНОВНОЙ ЦИКЛ ====================
+
+    async def create_and_start_app(self):
         """Создание и запуск приложения БЕЗ конфликтов"""
         await self.initialize()
         
@@ -1015,7 +1017,7 @@ class SubscriptionTelegramBot:
                 reply_markup=self.get_main_menu_keyboard()
             )
     
-       async def cleanup(self):
+    async def cleanup(self):
         """Очистка ресурсов"""
         if self.app:
             try:
